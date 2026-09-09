@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="sk">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Termíny plávania</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: #1a1a2e;
+    background: transparent;
+  }
+  #root { padding: 4px 2px 12px 2px; }
+  .group-label {
+    font-weight: 700;
+    font-size: 16px;
+    margin: 4px 0 14px 0;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #e4e4ec;
+  }
+  .day-block { margin-bottom: 18px; }
+  .day-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .day-row.disabled { cursor: default; opacity: 0.5; }
+  .day-row input[type="checkbox"] {
+    width: 20px;
+    height: 20px;
+    accent-color: #3355ee;
+    cursor: pointer;
+  }
+  .day-row.disabled input[type="checkbox"] { cursor: default; }
+  .day-label { font-size: 15px; }
+  .day-full-tag {
+    font-size: 12px;
+    color: #b3261e;
+    background: #fdecea;
+    border-radius: 4px;
+    padding: 2px 6px;
+    margin-left: 4px;
+  }
+  .time-options {
+    margin: 10px 0 0 30px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .time-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .time-row input[type="radio"] {
+    width: 18px;
+    height: 18px;
+    accent-color: #3355ee;
+    cursor: pointer;
+  }
+  .time-label { font-size: 14.5px; color: #333; }
+  .slots-left {
+    font-size: 12px;
+    color: #888;
+    margin-left: 4px;
+  }
+  .status-msg {
+    font-size: 13px;
+    color: #888;
+    padding: 6px 0;
+  }
+  .error-msg {
+    font-size: 13px;
+    color: #b3261e;
+    padding: 6px 0;
+  }
+  .retry-btn {
+    font-size: 12px;
+    color: #3355ee;
+    background: none;
+    border: 1px solid #3355ee;
+    border-radius: 4px;
+    padding: 3px 8px;
+    cursor: pointer;
+    margin-left: 8px;
+  }
+  .validation-msg {
+    font-size: 12.5px;
+    color: #b3261e;
+    margin-top: 6px;
+    display: none;
+  }
+</style>
+</head>
+<body>
+<div id="root">
+  <div class="status-msg" id="statusMsg">Načítavam dostupné termíny…</div>
+</div>
+
+<script src="https://js.jotform.com/JotFormCustomWidget.min.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  // ---------------------------------------------------------------------
+  // Configuration read from the widget's settings (set when you add the
+  // widget to your form, or via the default parameters on the widget
+  // registration). See the README for what each key does.
+  // ---------------------------------------------------------------------
+  var config = {
+    csvUrl: "",                 // published Google Sheet CSV URL (required)
+    group: "Skupina A",         // which "Group" rows in the sheet to use
+    groupLabel: "",             // heading text; defaults to group name
+    required: "true",           // must the respondent pick at least one time
+    showFullAsDisabled: "false" // "true" = show full days/times greyed out
+                                 // instead of hiding them
+  };
+
+  var root = document.getElementById("root");
+  var state = {
+    days: [],          // [{ day: "Utorok", times: [{time, capacity, registered, available}] }]
+    selection: {}       // { "Utorok": "17:00", "Stvrtok": "16:00" }
+  };
+
+  function csvParse(text) {
+    // Minimal CSV parser: handles quoted fields with commas/quotes.
+    var rows = [];
+    var row = [];
+    var field = "";
+    var inQuotes = false;
+    for (var i = 0; i < text.length; i++) {
+      var c = text[i];
+      if (inQuotes) {
+        if (c === '"') {
+          if (text[i + 1] === '"') { field += '"'; i++; }
+          else { inQuotes = false; }
+        } else { field += c; }
+      } else {
+        if (c === '"') { inQuotes = true; }
+        else if (c === ",") { row.push(field); field = ""; }
+        else if (c === "\n" || c === "\r") {
+          if (c === "\r" && text[i + 1] === "\n") i++;
+          row.push(field); field = "";
+          if (row.length > 1 || row[0] !== "") rows.push(row);
+          row = [];
+        } else { field += c; }
+      }
+    }
+    if (field !== "" || row.length) { row.push(field); rows.push(row); }
+    return rows;
+  }
+
+  function normalize(s) {
+    return (s || "").toString().trim();
+  }
+
+  function buildDaysFromCsv(rows) {
+    // Expected header: Group, Day, Time, Capacity, Registered
+    if (!rows.length) return [];
+    var header = rows[0].map(function (h) { return normalize(h).toLowerCase(); });
+    var idx = {
+      group: header.indexOf("group"),
+      day: header.indexOf("day"),
+      time: header.indexOf("time"),
+      capacity: header.indexOf("capacity"),
+      registered: header.indexOf("registered")
+    };
+    if (idx.day === -1 || idx.time === -1 || idx.capacity === -1) {
+      throw new Error("Sheet is missing required columns (Day, Time, Capacity).");
+    }
+
+    var byDay = {};
+    var order = [];
+    for (var r = 1; r < rows.length; r++) {
+      var row = rows[r];
+      if (!row || !row.length) continue;
+      var rowGroup = idx.group > -1 ? normalize(row[idx.group]) : config.group;
+      if (config.group && rowGroup && rowGroup !== config.group) continue;
+
+      var day = normalize(row[idx.day]);
+      var time = normalize(row[idx.time]);
+      if (!day || !time) continue;
+      var capacity = parseInt(row[idx.capacity], 10);
+      if (isNaN(capacity)) capacity = 0;
+      var registered = idx.registered > -1 ? parseInt(row[idx.registered], 10) : 0;
+      if (isNaN(registered)) registered = 0;
+
+      if (!byDay[day]) { byDay[day] = []; order.push(day); }
+      byDay[day].push({
+        time: time,
+        capacity: capacity,
+        registered: registered,
+        available: registered < capacity
+      });
+    }
+
+    return order.map(function (day) {
+      // keep sheet order for times too, already pushed in order
+      return { day: day, times: byDay[day] };
+    });
+  }
+
+  function render() {
+    root.innerHTML = "";
+
+    var heading = document.createElement("div");
+    heading.className = "group-label";
+    heading.textContent = config.groupLabel || config.group;
+    root.appendChild(heading);
+
+    if (!state.days.length) {
+      var none = document.createElement("div");
+      none.className = "status-msg";
+      none.textContent = "Pre túto skupinu nie sú momentálne k dispozícii žiadne termíny.";
+      root.appendChild(none);
+    }
+
+    state.days.forEach(function (d) {
+      var block = document.createElement("div");
+      block.className = "day-block";
+
+      var availableTimes = config.showFullAsDisabled === "true"
+        ? d.times
+        : d.times.filter(function (t) { return t.available; });
+
+      var dayHasAvailability = d.times.some(function (t) { return t.available; });
+
+      var dayRow = document.createElement("div");
+      dayRow.className = "day-row" + (dayHasAvailability ? "" : " disabled");
+
+      var checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.disabled = !dayHasAvailability;
+      checkbox.checked = !!state.selection[d.day];
+
+      var label = document.createElement("span");
+      label.className = "day-label";
+      label.textContent = d.day;
+
+      dayRow.appendChild(checkbox);
+      dayRow.appendChild(label);
+
+      if (!dayHasAvailability) {
+        var tag = document.createElement("span");
+        tag.className = "day-full-tag";
+        tag.textContent = "Plné";
+        dayRow.appendChild(tag);
+      }
+
+      block.appendChild(dayRow);
+
+      var timesWrap = document.createElement("div");
+      timesWrap.className = "time-options";
+      timesWrap.style.display = checkbox.checked ? "flex" : "none";
+
+      availableTimes.forEach(function (t) {
+        var timeRow = document.createElement("div");
+        timeRow.className = "time-row";
+
+        var radio = document.createElement("input");
+        radio.type = "radio";
+        radio.name = "time_" + d.day;
+        radio.value = t.time;
+        radio.disabled = !t.available;
+        radio.checked = state.selection[d.day] === t.time;
+
+        var tlabel = document.createElement("span");
+        tlabel.className = "time-label";
+        tlabel.textContent = t.time;
+
+        timeRow.appendChild(radio);
+        timeRow.appendChild(tlabel);
+
+        if (!t.available) {
+          var full = document.createElement("span");
+          full.className = "day-full-tag";
+          full.textContent = "Plné";
+          timeRow.appendChild(full);
+        } else if (t.capacity) {
+          var left = document.createElement("span");
+          left.className = "slots-left";
+          left.textContent = "(" + (t.capacity - t.registered) + " voľných)";
+          timeRow.appendChild(left);
+        }
+
+        radio.addEventListener("change", function () {
+          state.selection[d.day] = t.time;
+          emitValue();
+        });
+
+        timesWrap.appendChild(timeRow);
+      });
+
+      block.appendChild(timesWrap);
+      root.appendChild(block);
+
+      checkbox.addEventListener("change", function () {
+        if (checkbox.checked) {
+          timesWrap.style.display = "flex";
+        } else {
+          timesWrap.style.display = "none";
+          delete state.selection[d.day];
+        }
+        emitValue();
+        resize();
+      });
+    });
+
+    var validationMsg = document.createElement("div");
+    validationMsg.className = "validation-msg";
+    validationMsg.id = "validationMsg";
+    validationMsg.textContent = "Prosím, vyberte aspoň jeden termín.";
+    root.appendChild(validationMsg);
+
+    resize();
+  }
+
+  function currentValueString() {
+    var parts = [];
+    state.days.forEach(function (d) {
+      if (state.selection[d.day]) {
+        parts.push(d.day + " " + state.selection[d.day]);
+      }
+    });
+    return parts.join(", ");
+  }
+
+  function emitValue() {
+    JFCustomWidget.sendData({ value: currentValueString() });
+  }
+
+  function resize() {
+    try {
+      JFCustomWidget.requestFrameResize({ height: root.scrollHeight + 20 });
+    } catch (e) { /* no-op outside Jotform */ }
+  }
+
+  function showError(message) {
+    root.innerHTML = "";
+    var err = document.createElement("div");
+    err.className = "error-msg";
+    err.textContent = message;
+    var retry = document.createElement("button");
+    retry.className = "retry-btn";
+    retry.textContent = "Skúsiť znova";
+    retry.addEventListener("click", loadData);
+    root.appendChild(err);
+    root.appendChild(retry);
+    resize();
+  }
+
+  function loadData() {
+    root.innerHTML = "";
+    var loading = document.createElement("div");
+    loading.className = "status-msg";
+    loading.textContent = "Načítavam dostupné termíny…";
+    root.appendChild(loading);
+    resize();
+
+    if (!config.csvUrl) {
+      showError("Widget nie je nastavený: chýba adresa Google Sheet (csvUrl).");
+      return;
+    }
+
+    var bustedUrl = config.csvUrl +
+      (config.csvUrl.indexOf("?") > -1 ? "&" : "?") + "_=" + Date.now();
+
+    fetch(bustedUrl)
+      .then(function (resp) {
+        if (!resp.ok) throw new Error("HTTP " + resp.status);
+        return resp.text();
+      })
+      .then(function (text) {
+        var rows = csvParse(text);
+        state.days = buildDaysFromCsv(rows);
+        state.selection = {};
+        render();
+        emitValue();
+      })
+      .catch(function (e) {
+        console.error("swim-slots-widget: failed to load sheet", e);
+        showError("Nepodarilo sa načítať dostupné termíny. Skúste to prosím znova.");
+      });
+  }
+
+  JFCustomWidget.subscribe("ready", function () {
+    var settings = JFCustomWidget.getWidgetSettings ? JFCustomWidget.getWidgetSettings() : {};
+    Object.keys(config).forEach(function (key) {
+      if (settings && settings[key] !== undefined && settings[key] !== "") {
+        config[key] = settings[key];
+      }
+    });
+    loadData();
+  });
+
+  JFCustomWidget.subscribe("submit", function () {
+    var value = currentValueString();
+    var valid = true;
+    if (config.required === "true" && !value) {
+      valid = false;
+      var msg = document.getElementById("validationMsg");
+      if (msg) msg.style.display = "block";
+      resize();
+    }
+    JFCustomWidget.sendSubmit({ valid: valid, value: value });
+  });
+})();
+</script>
+</body>
+</html>
