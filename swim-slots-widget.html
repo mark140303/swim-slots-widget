@@ -113,12 +113,12 @@
   // registration). See the README for what each key does.
   // ---------------------------------------------------------------------
   var config = {
-    csvUrl: "",                 // published Google Sheet CSV URL (required)
-    group: "Skupina A",         // which "Group" rows in the sheet to use
-    groupLabel: "",             // heading text; defaults to group name
-    required: "true",           // must the respondent pick at least one time
-    showFullAsDisabled: "false" // "true" = show full days/times greyed out
-                                 // instead of hiding them
+    csvUrl: "",                    // published Google Sheet CSV URL (required)
+    capacity: "30",                // max people per slot (same number for every slot)
+    groupLabel: "Termíny plávania", // heading text shown above the days
+    required: "true",              // must the respondent pick at least one time
+    showFullAsDisabled: "false"    // "true" = show full days/times greyed out
+                                    // instead of hiding them
   };
 
   var root = document.getElementById("root");
@@ -160,35 +160,32 @@
   }
 
   function buildDaysFromCsv(rows) {
-    // Expected header: Group, Day, Time, Capacity, Registered
+    // Expected layout: one COLUMN per day+time slot, header cell like
+    // "utorok 16:00", with the number of people already registered for
+    // that slot somewhere below it (any extra rows below the header are
+    // summed together, so a single totals row works fine).
     if (!rows.length) return [];
-    var header = rows[0].map(function (h) { return normalize(h).toLowerCase(); });
-    var idx = {
-      group: header.indexOf("group"),
-      day: header.indexOf("day"),
-      time: header.indexOf("time"),
-      capacity: header.indexOf("capacity"),
-      registered: header.indexOf("registered")
-    };
-    if (idx.day === -1 || idx.time === -1 || idx.capacity === -1) {
-      throw new Error("Sheet is missing required columns (Day, Time, Capacity).");
-    }
+    var header = rows[0] || [];
+    var capacity = parseInt(config.capacity, 10);
+    if (isNaN(capacity)) capacity = 0;
 
     var byDay = {};
     var order = [];
-    for (var r = 1; r < rows.length; r++) {
-      var row = rows[r];
-      if (!row || !row.length) continue;
-      var rowGroup = idx.group > -1 ? normalize(row[idx.group]) : config.group;
-      if (config.group && rowGroup && rowGroup !== config.group) continue;
 
-      var day = normalize(row[idx.day]);
-      var time = normalize(row[idx.time]);
-      if (!day || !time) continue;
-      var capacity = parseInt(row[idx.capacity], 10);
-      if (isNaN(capacity)) capacity = 0;
-      var registered = idx.registered > -1 ? parseInt(row[idx.registered], 10) : 0;
-      if (isNaN(registered)) registered = 0;
+    for (var c = 0; c < header.length; c++) {
+      var raw = normalize(header[c]);
+      if (!raw) continue;
+      var match = raw.match(/^(.*\S)\s+(\d{1,2}:\d{2})$/);
+      if (!match) continue; // skip any column that isn't "<day> <time>"
+      var day = match[1];
+      var time = match[2];
+
+      var registered = 0;
+      for (var r = 1; r < rows.length; r++) {
+        var cell = rows[r] && rows[r][c];
+        var n = parseInt(cell, 10);
+        if (!isNaN(n)) registered += n;
+      }
 
       if (!byDay[day]) { byDay[day] = []; order.push(day); }
       byDay[day].push({
@@ -200,7 +197,6 @@
     }
 
     return order.map(function (day) {
-      // keep sheet order for times too, already pushed in order
       return { day: day, times: byDay[day] };
     });
   }
@@ -210,7 +206,7 @@
 
     var heading = document.createElement("div");
     heading.className = "group-label";
-    heading.textContent = config.groupLabel || config.group;
+    heading.textContent = config.groupLabel;
     root.appendChild(heading);
 
     if (!state.days.length) {
