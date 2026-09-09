@@ -317,14 +317,16 @@
   }
 
   function currentValueString() {
-    // Always lists every day, so downstream logic (e.g. a datepicker
-    // reading this field's value) can just check for "<day>:TRUE" —
-    // a day is TRUE only when its checkbox is checked AND a time under
-    // it is chosen; the chosen time is kept after it for records.
+    // Only lists days that are fully chosen (checkbox checked AND a time
+    // picked under it) — e.g. "utorok:TRUE:17:00, streda:TRUE:16:00".
+    // Days that aren't fully chosen are omitted entirely, so a downstream
+    // reader can just check whether the string contains "<day>:TRUE".
     var parts = [];
     state.days.forEach(function (d) {
       var time = state.selection[d.day];
-      parts.push(d.day + (time ? (":TRUE:" + time) : ":FALSE"));
+      if (time) {
+        parts.push(d.day + ":TRUE:" + time);
+      }
     });
     return parts.join(", ");
   }
